@@ -1,0 +1,391 @@
+# =============================
+# Importación de librerías
+# =============================
+
+import pandas as pd              # Biblioteca para manipulación y análisis de datos
+import tkinter as tk             # Biblioteca estándar para interfaces gráficas
+from tkinter import filedialog, messagebox  # Componentes de diálogo para selección de archivos y mensajes
+import os                        # Operaciones del sistema de archivos
+import subprocess                # Ejecución de procesos externos (para abrir Excel)
+from openpyxl import load_workbook  # Manipulación avanzada de archivos Excel
+from openpyxl.styles import PatternFill, Border, Side, Font, Alignment, numbers  # Estilos para Excel
+from openpyxl.utils import get_column_letter  # Utilidad para convertir índice numérico a letra de columna
+from openpyxl.chart import BarChart, Reference  # Creación de gráficos en Excel
+                                                                    
+# =============================
+# Función de transformación principal
+# =============================
+def transformar_excel(ruta_entrada, ruta_salida):
+    """
+    Función principal que transforma un archivo Excel de contabilidad
+    en un formato estilizado y clasificado por categorías.
+    
+    Argumentos:
+        ruta_entrada: Ruta del archivo Excel de origen
+        ruta_salida: Ruta donde se guardará el archivo Excel procesado
+    """
+    # Leer datos del archivo Excel de entrada
+    df = pd.read_excel(ruta_entrada)
+    
+    # Verificar si las columnas requeridas existen en el DataFrame
+    if 'Asiento contable' not in df.columns or 'Referencia' not in df.columns:
+        raise ValueError("Las columnas requeridas 'Asiento contable' o 'Referencia' no existen en el archivo Excel")
+    
+    # Asegurarnos de que cada asiento contable esté correctamente identificado
+    # Forward fill - propaga el último valor válido a las celdas vacías subsiguientes
+    df['asiento_id'] = df['Asiento contable'].fillna(method='ffill')
+    
+    # Identificar los asientos contables que tienen al menos una fila con importe negativo
+    asientos_con_negativos = df[df['Importe'].astype(str).str.contains('-', na=False)]['asiento_id'].unique()
+    
+    # Filtrar el DataFrame para excluir todas las filas que pertenecen a esos asientos
+    df = df[~df['asiento_id'].isin(asientos_con_negativos)]
+    
+    # Crear columnas auxiliares para búsqueda insensible a mayúsculas/minúsculas
+    df['linea'] = df['Líneas de factura'].fillna('').astype(str).str.lower()
+    df['partner'] = df['Partner'].fillna('').astype(str).str.lower()
+
+    # Continúa con el resto del código...
+
+    # Mapeo de categorías contables a palabras clave para clasificación automática
+    keywords_map = {
+        'Parque': ['f6par'],         # Categoría Parque - busca 'f6par' en textos
+        'Norte': ['sexta norte'],    # Categoría Norte - busca 'sexta norte'
+        'Palacio': ['palacio'],      # Categoría Palacio
+        'Sendero': ['fsend'],        # Categoría Sendero
+        'Galeria': ['fgale'],        # Categoría Galería
+        'Evento': ['evento'],        # Categoría Evento
+        'KKTN 1': ['fcac1'],         # Categoría KKTN 1
+        'KKTN 2': ['fcac2'],         # Categoría KKTN 2
+        'KKTN 3': ['fcac3'],         # Categoría KKTN 3
+        'Comision': ['comision'],    # Categoría Comisión
+        'FMDIS': ['fmdis' ,'fcomi'], # Categoría FMDIS - busca 'fmdis' o 'fcomi'
+        'Traspaso': ['traspaso'],    # Categoría Traspaso
+        'Telmov': ['telmov'],        # Categoría Telmov
+        'Lespago': ['lespago'],      # Categoría Lespago
+        'Otro': []                   # Categoría Otro (sin palabras clave específicas)
+    }
+
+    def clasificar_asiento(grupo):
+        """
+        Función interna que clasifica un grupo de transacciones pertenecientes 
+        al mismo asiento contable en las categorías definidas.
+        
+        Args:
+            grupo: DataFrame con transacciones de un mismo asiento contable
+        
+        Returns:
+            pd.Series: Serie con los datos procesados del asiento
+        """
+        # Extraer el identificador del asiento contable actual
+        asiento = grupo['asiento_id'].iloc[0]
+        
+        # Filtrar para asegurarnos de que solo procesamos filas del asiento actual
+        grupo_filtrado = grupo[grupo['asiento_id'] == asiento]
+        
+        # Inicializar diccionario de resultados para este asiento
+        res = {}
+        
+        # Extraer información básica del asiento
+        res['Día'] = pd.to_datetime(grupo_filtrado['Fecha'].iloc[0]).date() if not pd.isna(grupo_filtrado['Fecha'].iloc[0]) else None
+        res['Concepto / Referencia'] = grupo_filtrado['Líneas de factura'].iloc[0] if not pd.isna(grupo_filtrado['Líneas de factura'].iloc[0]) else ""
+        res['cargo'] = ""  # Columna vacía para uso posterior
+        res['Abono'] = grupo_filtrado['Importe'].sum()  # Suma total de importes del asiento
+        res['Referencia'] = grupo_filtrado['Referencia'].iloc[0] if not pd.isna(grupo_filtrado['Referencia'].iloc[0]) else ""
+        
+        # Clasificación de montos por categoría según palabras clave
+        for col, keys in keywords_map.items():
+            # Crear máscara para filas que contienen palabras clave en 'linea' o 'partner'
+            mask = grupo_filtrado.apply(lambda r: any(kw in r['linea'] for kw in keys)
+                            or any(kw in r['partner'] for kw in keys), axis=1)
+            
+            # Caso especial para 'Traspaso' - solo suma los débitos
+            if col == 'Traspaso':
+                res[col] = grupo_filtrado.loc[mask, 'Líneas de factura/Débito'].sum()
+            else:
+                # Para otras categorías, suma débitos y créditos
+                res[col] = grupo_filtrado.loc[mask, 'Líneas de factura/Débito'].sum() + grupo_filtrado.loc[mask, 'Líneas de factura/Crédito'].sum()
+     
+        # Cálculo de ajuste por redondeo y montos no clasificados
+        # 1. suma_clas: suma de todos los importes asignados a categorías
+        suma_clas = sum(res[c] for c in keywords_map)
+        # 2. base: monto total de la transacción
+        base = res['Abono']
+        # 3. Redond: diferencia entre el monto total y la suma clasificada
+        res['Redond'] = base - suma_clas 
+        
+        # Cálculo del saldo final: Abono menos todas las categorías y el redondeo
+        res['Saldo'] = res['Abono'] - sum(res[c] for c in keywords_map) - res['Redond']
+        
+        return pd.Series(res)  # Retorna los resultados como una Serie de pandas
+
+    # Agrupar por asiento contable y aplicar la función de clasificación
+    df_grouped = df.groupby('asiento_id', dropna=False).apply(clasificar_asiento).reset_index()
+    
+    # Renombrar la columna asiento_id de vuelta a 'Asiento contable'
+    df_grouped = df_grouped.rename(columns={'asiento_id': 'Asiento contable'})
+    
+    # Agregar columna de numeración consecutiva
+    df_grouped.insert(0, '#', range(1, len(df_grouped) + 1))
+    
+    # Calcular totales para la fila final
+    total = {c: df_grouped[c].sum() if pd.api.types.is_numeric_dtype(df_grouped[c]) else ''
+        for c in df_grouped.columns}
+    total['Concepto / Referencia'] = 'TOTAL'  # Etiqueta para la fila de totales
+    
+    # Agregar fila de totales al DataFrame
+    df_grouped = pd.concat([df_grouped, pd.DataFrame([total])], ignore_index=True)
+
+    # Exportar preliminar a Excel (sin estilos)
+    df_grouped.to_excel(ruta_salida, index=False)
+
+    # ========================
+    # Aplicación de estilos y gráficos
+    # ========================
+    wb = load_workbook(ruta_salida)  # Cargar el archivo Excel generado
+    ws = wb.active  # Obtener la hoja activa
+
+    # Estilo para la cabecera (primera fila)
+    header_fill = PatternFill('solid', start_color='4472C4', end_color='4472C4')  # Fondo azul
+    header_font = Font(color='FFFFFF', bold=True)  # Texto blanco y negrita
+    for cell in ws[1]:  # Iterar por las celdas de la primera fila
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal='center')  # Centrar texto
+
+    # Congelar paneles y agregar autofiltro
+    ws.freeze_panes = 'B2'  # Congelar primera fila y primera columna
+    ws.auto_filter.ref = f"A1:{get_column_letter(ws.max_column)}1"  # Filtro en todas las columnas
+    
+    # Auto-ajustar anchos de columna según contenido
+    for col_cells in ws.columns:
+        max_length = max((len(str(cell.value)) for cell in col_cells if cell.value), default=0)
+        ws.column_dimensions[col_cells[0].column_letter].width = max_length + 2
+    
+    # Definir paleta de colores para categorías
+    palette = ['D9EAD3','FCE5CD','D0E0E3','EAD1DC','FFF2CC','C9DAF8','E2EFDA','E6B8B7',
+            'FFD966','B6D7A8','EA9999','A4C2F4','D5A6BD','B7DEE8']  # Lista de colores en hex
+    
+    # Asignar un color a cada categoría del keywords_map
+    color_map = {col: PatternFill('solid', start_color=palette[i % len(palette)],
+                end_color=palette[i % len(palette)])
+                for i, col in enumerate(keywords_map)}
+
+    # Aplicar colores a las celdas según su categoría
+    for idx, col in enumerate(df_grouped.columns, start=1):
+        if col in color_map:  # Si la columna es una categoría con color asignado
+            for r in range(2, ws.max_row):  # Para cada fila (excepto header)
+                cell = ws.cell(r, idx)
+                # Colorear solo si la celda tiene valor
+                if cell.value not in (None, 0, ''):
+                    cell.fill = color_map[col]
+
+    # Encontrar índices de columnas importantes para estilizado especial
+    concepto_ref_idx = None
+    abono_idx = None
+    redond_idx = None
+    
+    for idx, col in enumerate(df_grouped.columns, start=1):
+        if col == 'Concepto / Referencia':
+            concepto_ref_idx = idx
+        elif col == 'Abono':
+            abono_idx = idx
+        elif col == 'Redond':
+            redond_idx = idx
+    
+    # Definir colores personalizados para celdas especiales
+    deposito_fill = PatternFill('solid', start_color='FFCCCC', end_color='FFCCCC')  # Rosado para depósitos
+    traspaso_fill = PatternFill('solid', start_color='CCFFCC', end_color='CCFFCC')  # Verde para traspasos
+    abono_fill = PatternFill('solid', start_color='CCE5FF', end_color='CCE5FF')     # Azul para abonos
+    
+    # Aplicar formatos especiales a cada fila
+    for r in range(2, ws.max_row + 1):
+        # Formatear números con separador de miles y 2 decimales
+        for c in range(1, ws.max_column + 1):
+            cell = ws.cell(r, c)
+            if isinstance(cell.value, (int, float)):
+                cell.number_format = '#,##0.00'
+        
+        # Aplicar colores específicos según el contenido del concepto
+        if concepto_ref_idx:
+            concepto_valor = str(ws.cell(r, concepto_ref_idx).value).lower()
+            if 'deposito en efectivo' in concepto_valor:
+                ws.cell(r, concepto_ref_idx).fill = deposito_fill
+            elif 'traspaso' in concepto_valor:
+                ws.cell(r, concepto_ref_idx).fill = traspaso_fill
+        
+        # Columna Abono en azul
+        if abono_idx:
+            ws.cell(r, abono_idx).fill = abono_fill
+        
+        # Formateo especial para valores de Redondeo
+        if redond_idx:
+            redond_cell = ws.cell(r, redond_idx)
+            if isinstance(redond_cell.value, (int, float)) and redond_cell.value < 0:
+                redond_cell.font = Font(color='FF0000')  # Rojo para valores negativos
+            if isinstance(redond_cell.value, (int, float)) and redond_cell.value > 0: 
+                redond_cell.font = Font(color='000000')  # Negro para valores positivos
+            if isinstance(redond_cell.value, (int, float)) and redond_cell.value == 0: 
+                redond_cell.font = Font(color='FFFFFF')  # Blanco para ceros (ocultar)
+    
+    # Sombreado alternado para filas (solo celdas sin estilo previo)
+    alt_fill = PatternFill('solid', start_color='F2F2F2', end_color='F2F2F2')  # Gris claro
+    total_row = ws.max_row
+    for r in range(2, total_row):  # No aplicar a la fila de totales
+        if r % 2 == 0:  # Solo filas pares
+            for c in range(1, ws.max_column + 1):
+                cell = ws.cell(r, c)
+                # Aplicar solo si la celda no tiene un estilo de fondo ya definido
+                if cell.fill.fill_type is None:
+                    cell.fill = alt_fill
+
+    # Línea separadora entre fechas distintas
+    border = Border(bottom=Side(style='thin', color='000000'))
+    last = None
+    for r in range(2, ws.max_row):
+        curr = ws.cell(r, 2).value  # Valor de la columna Día
+        # Si cambia la fecha, añadir borde inferior a la fila anterior
+        if last and curr != last:
+            for c in range(1, ws.max_column + 1):
+                ws.cell(r - 1, c).border = border
+        last = curr
+
+    # Estilo especial para fila de TOTAL
+    total_fill = PatternFill('solid', start_color='F4CCCC', end_color='F4CCCC')  # Rosa claro
+    for c in range(1, ws.max_column + 1):
+        cell = ws.cell(ws.max_row, c)
+        cell.fill = total_fill
+        cell.font = Font(bold=True)
+        cell.alignment = Alignment(horizontal='center')
+
+    # Crear gráfico de barras con el resumen por categoría
+    chart = BarChart()
+    chart.title = 'Resumen Totales por Categor%C3%ADa'  # Título del gráfico
+    cats = Reference(ws, min_row=1, min_col=7, max_col=6 + len(keywords_map))  # Etiquetas categorías
+    vals = Reference(ws, min_row=ws.max_row, min_col=7, max_col=6 + len(keywords_map))  # Valores (fila TOTAL)
+    chart.add_data(vals, titles_from_data=False)
+    chart.set_categories(cats)
+    
+    # Crear hoja nueva para el gráfico
+    ws_chart = wb.create_sheet('Resumen')
+    ws_chart.add_chart(chart, 'A1')
+
+    # Guardar el archivo Excel con todos los estilos aplicados
+    wb.save(ruta_salida)
+
+# =============================
+# Interfaz gráfica Tkinter
+# =============================
+class App:
+    """
+    Clase que implementa la interfaz gráfica de usuario usando Tkinter.
+    """
+    def __init__(self, root):
+        """
+        Constructor que inicializa la ventana principal.
+        
+        Args:
+            root: Objeto raíz de Tkinter
+        """
+        self.root = root
+        self.root.title("📊 Transformador Excel Contable")  # Título de la ventana
+        self.root.geometry("800x500")  # Tamaño de la ventana
+        self.root.configure(bg='#ecf0f1')  # Color de fondo (gris claro)
+        self.ruta_entrada = ''  # Variable para almacenar ruta del archivo de entrada
+        self.ruta_salida = ''   # Variable para almacenar ruta del archivo de salida
+        self.build_ui()  # Construir la interfaz
+
+    def build_ui(self):
+        """
+        Construye todos los elementos de la interfaz gráfica.
+        """
+        # Título principal
+        tk.Label(self.root, text="💼 Transformador Excel Contable", 
+                 font=("Helvetica", 22, "bold"), 
+                 bg="#ecf0f1", fg="#2c3e50").pack(pady=20)
+        
+        # Botón para cargar archivo Excel
+        tk.Button(self.root, text="📂 Cargar archivo Excel", 
+                  font=("Helvetica", 14), bg="#2980b9", fg="white",
+                  command=self.cargar_archivo, padx=10, pady=5).pack(pady=10)
+        
+        # Etiqueta para mostrar el archivo cargado
+        self.label_archivo = tk.Label(self.root, 
+                                      text="Archivo cargado: Ninguno", 
+                                      font=("Helvetica", 10), 
+                                      bg="#ecf0f1", fg="#7f8c8d", 
+                                      wraplength=700)
+        self.label_archivo.pack(pady=5)
+        
+        # Botón para generar y guardar el archivo procesado
+        tk.Button(self.root, text="💾 Generar y guardar archivo", 
+                  font=("Helvetica", 14), bg="#27ae60", fg="white",
+                  command=self.guardar_archivo, padx=10, pady=5).pack(pady=15)
+        
+        # Etiqueta para mostrar el archivo generado
+        self.label_guardado = tk.Label(self.root, 
+                                       text="Archivo generado: Ninguno", 
+                                       font=("Helvetica", 10), 
+                                       bg="#ecf0f1", fg="#7f8c8d", 
+                                       wraplength=700)
+        self.label_guardado.pack(pady=5)
+        
+        # Botón para abrir el archivo generado
+        tk.Button(self.root, text="📊 Abrir archivo generado", 
+                  font=("Helvetica", 14), bg="#e67e22", fg="white",
+                  command=self.abrir_archivo, padx=10, pady=5).pack(pady=10)
+
+    def cargar_archivo(self):
+        """
+        Abre un diálogo para seleccionar el archivo Excel de entrada.
+        """
+        ruta = filedialog.askopenfilename(filetypes=[("Archivos Excel", "*.xlsx")])
+        if ruta:  # Si se seleccionó un archivo
+            self.ruta_entrada = ruta
+            # Actualizar etiqueta con el nombre del archivo (sin la ruta completa)
+            self.label_archivo.config(text=f"Archivo cargado: {os.path.basename(ruta)}")
+
+    def guardar_archivo(self):
+        """
+        Abre un diálogo para guardar el archivo Excel procesado y
+        llama a la función de transformación.
+        """
+        if not self.ruta_entrada:  # Verificar que se haya cargado un archivo
+            messagebox.showwarning("⚠️ Advertencia", "Selecciona un archivo primero.")
+            return
+        
+        # Diálogo para elegir ubicación y nombre del archivo de salida
+        ruta = filedialog.asksaveasfilename(
+            defaultextension=".xlsx", 
+            filetypes=[("Archivos Excel","*.xlsx")]
+        )
+        
+        if ruta:  # Si se seleccionó una ubicación
+            try:
+                # Llamar a la función de transformación
+                transformar_excel(self.ruta_entrada, ruta)
+                self.ruta_salida = ruta
+                # Actualizar etiqueta con el nombre del archivo generado
+                self.label_guardado.config(text=f"Generado: {os.path.basename(ruta)}")
+                # Mostrar mensaje de éxito
+                messagebox.showinfo("✅ Éxito","Archivo creado y estilizado.")
+            except Exception as e:
+                # Mostrar mensaje de error si algo falla
+                messagebox.showerror("❌ Error", str(e))
+
+    def abrir_archivo(self):
+        """
+        Abre el archivo Excel generado con la aplicación predeterminada.
+        """
+        if self.ruta_salida and os.path.exists(self.ruta_salida):
+            # Abrir el archivo con la aplicación predeterminada
+            subprocess.Popen(['start','',self.ruta_salida], shell=True)
+        else:
+            # Mostrar advertencia si el archivo no existe
+            messagebox.showwarning("⚠️ Advertencia","Archivo no encontrado.")
+
+# Punto de entrada del programa
+if __name__ == '__main__':
+    root = tk.Tk()  # Crear la ventana raíz de Tkinter
+    App(root)       # Inicializar la aplicación
+    root.mainloop() # Iniciar el bucle principal de eventos

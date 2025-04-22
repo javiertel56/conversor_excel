@@ -1,0 +1,326 @@
+import os
+import pandas as pd
+import tkinter as tk
+from tkinter import filedialog, messagebox
+from tkinter.scrolledtext import ScrolledText
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
+from openpyxl.utils import get_column_letter
+
+# ---------------- Funciones de transformación ------------------
+def formatear_monto(valor):
+    """Formatea un número con separador de miles y dos decimales."""
+    return f"{valor:,.2f}"
+
+def procesar_detalles(detalle_df, main_amount):
+    """
+    Procesa las filas de detalle de un grupo y retorna un diccionario
+    con los valores asignados a las columnas extra según palabras clave.
+    Se usa:
+      - "alm/": para asignar el monto principal en Almacen y un texto en Referencia.
+      - "facta": para acumular importes y textos.
+      - "spei": para asignar el monto principal en Traspaso.
+      - Si no coincide, se acumula en Otros.
+    """
+    out = {
+        "Referencia": "",
+        "Facta": 0.0,
+        "Master": "",
+        "Almacen": 0.0,
+        "Comision": 0.0,
+        "Submarcell": 0.0,
+        "Linea9": "",
+        "Traspaso": 0.0,
+        "SAT": 0.0,
+        "Otros": 0.0
+    }
+    facta_textos = []
+    for idx, row in detalle_df.iterrows():
+        texto = str(row.get("Líneas de factura", "")).strip().lower()
+        debito = row.get("Líneas de factura/Débito", 0) or 0
+        credito = row.get("Líneas de factura/Crédito", 0) or 0
+        detalle_monto = abs(debito) if pd.notnull(debito) and debito != 0 else abs(credito)
+        
+        if "alm/" in texto:
+            out["Almacen"] = main_amount
+            # Se toma el texto completo que contenga "alm/"
+            out["Referencia"] = texto  
+        elif "facta" in texto:
+            facta_textos.append(texto)
+            out["Facta"] += detalle_monto
+        elif "spei" in texto:
+            out["Traspaso"] = main_amount
+        else:
+            out["Otros"] += detalle_monto
+    if facta_textos:
+        # Se concatenan los textos que contengan "facta"
+        out["Referencia"] = "+".join(facta_textos)
+        diferencia = main_amount - out["Facta"]
+        out["Otros"] = diferencia if diferencia > 0 else 0.0
+    return out
+
+def transformar_archivo(ruta_input, log_callback):
+    """
+    Realiza la transformación del archivo excel1:
+      - Filtra filas con Importe negativo.
+      - Realiza forward-fill en columnas clave.
+      - Agrupa registros (fila principal y filas detalle).
+      - Procesa cada grupo asignando valores a las columnas extra.
+      - Filtra registros a partir del 01/02/2025 y los ordena por fecha.
+      - Retorna un DataFrame con la estructura final.
+    """
+    try:
+        log_callback("Cargando archivo...\n")
+        df = pd.read_excel(ruta_input, sheet_name="Sheet1")
+    except Exception as e:
+        messagebox.showerror("Error al cargar", f"No se pudo cargar el archivo.\n{e}")
+        return None
+
+    # Filtrar filas con Importe negativo (se descartan los negativos)
+    df = df[df["Importe"] >= 0]
+    log_callback("Filtradas filas con Importe negativo.\n")
+    
+    # Forward-fill en columnas clave para mantener datos agrupados
+    for col in ["Asiento contable", "Fecha", "Etiqueta", "Referencia"]:
+        df[col] = df[col].ffill()
+    log_callback("Realizado forward-fill en columnas clave.\n")
+    
+    # Identificar filas principales y crear identificador de grupo
+    df["es_main"] = df["Importe"].notna()
+    df["grupo"] = df["es_main"].cumsum()
+    
+    resultados = []
+    log_callback("Procesando registros...\n")
+    for grupo_id, grupo in df.groupby("grupo"):
+        main_df = grupo[grupo["es_main"]]
+        if main_df.empty:
+            continue
+        main_row = main_df.iloc[0]
+        main_amount = abs(main_row["Importe"])
+        fecha_str = pd.to_datetime(main_row["Fecha"]).strftime("%d/%m/%Y")
+        registro = {
+            "Día": fecha_str,
+            "Concepto / Referencia": main_row["Etiqueta"],
+            "cargo": "",
+            "Abono": formatear_monto(main_amount),
+            # Por defecto, se usa la referencia de la fila principal
+            "Referencia": main_row.get("Referencia", ""),
+            "Facta": "",
+            "Master": "",
+            "Almacen": "",
+            "Comision": "",
+            "Submarcell": "",
+            "Linea9": "",
+            "Traspaso": "",
+            "SAT": "",
+            "Otros": "",
+            "Redond": "",
+            "Saldo": "0.00"
+        }
+        detalles = grupo[~grupo["es_main"]]
+        if not detalles.empty:
+            extra = procesar_detalles(detalles, main_amount)
+            # Se construye la referencia a partir de los detalles detectados
+            ref_parts = []
+            if extra.get("Almacen", 0):
+                ref_parts.append(extra.get("Referencia", ""))
+                registro["Almacen"] = formatear_monto(extra.get("Almacen", 0))
+            if extra.get("Facta", 0) > 0:
+                ref_parts.append(extra.get("Referencia", ""))
+                registro["Facta"] = formatear_monto(extra.get("Facta", 0))
+                registro["Otros"] = formatear_monto(extra.get("Otros", 0))
+            if extra.get("Traspaso", 0) > 0:
+                ref_parts.append("spei")
+                registro["Traspaso"] = formatear_monto(extra.get("Traspaso", 0))
+            if ref_parts:
+                # Se concatenan con el signo "+"
+                registro["Referencia"] = "+".join(ref_parts)
+        resultados.append(registro)
+    
+    df_result = pd.DataFrame(resultados)
+    # Filtrar registros a partir del 01/02/2025 y ordenarlos por fecha
+    df_result['Fecha_dt'] = pd.to_datetime(df_result['Día'], format="%d/%m/%Y")
+    df_result = df_result[df_result['Fecha_dt'] >= pd.to_datetime("01/02/2025", format="%d/%m/%Y")].copy()
+    df_result = df_result.sort_values("Fecha_dt")
+    df_result = df_result.drop(columns=["Fecha_dt"])
+    
+    # Numerar filas de 1 en adelante
+    df_result.insert(0, "Unnamed: 0", range(1, len(df_result) + 1))
+    
+    # Orden final de columnas
+    orden_columnas = [
+        "Unnamed: 0", "Día", "Concepto / Referencia", "cargo", "Abono",
+        "Referencia", "Facta", "Master", "Almacen", "Comision",
+        "Submarcell", "Linea9", "Traspaso", "SAT", "Otros", "Redond", "Saldo"
+    ]
+    df_result = df_result[orden_columnas]
+    log_callback("Transformación completada.\n")
+    return df_result
+
+def crear_excel_formateado(df_result, output_path, log_callback):
+    """
+    Crea un nuevo archivo Excel a partir de df_result con un formato similar a excel2:
+      - Encabezado con fondo azul oscuro, fuente en negrita y bordes.
+      - Bordes finos en todas las celdas.
+      - Filas de datos con fondo alterno (gris claro en filas pares) para mayor legibilidad.
+      - Se agrega un borde superior grueso cuando cambia el día.
+    Guarda el archivo en output_path.
+    """
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Hoja3"
+
+    # Definir estilos
+    header_font = Font(bold=True, color="FFFFFF")
+    header_fill = PatternFill(start_color="003366", end_color="003366", fill_type="solid")
+    thin_border = Border(left=Side(style="thin"), right=Side(style="thin"),
+                         top=Side(style="thin"), bottom=Side(style="thin"))
+    thick_top_border = Border(top=Side(style="thick"))
+    alignment_center = Alignment(horizontal="center", vertical="center")
+
+    # Encabezados
+    headers = list(df_result.columns)
+    for col_idx, header in enumerate(headers, start=1):
+        cell = ws.cell(row=1, column=col_idx, value=header)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.border = thin_border
+        cell.alignment = alignment_center
+
+    previous_day = None
+    # Escribir datos a partir de la fila 2
+    for row_idx, row_data in enumerate(df_result.values, start=2):
+        current_day = row_data[1]  # la segunda columna es "Día"
+        # Si hay cambio de día, aplicar borde superior grueso
+        if previous_day and current_day != previous_day:
+            row_border = Border(left=Side(style="thin"), right=Side(style="thin"),
+                                top=Side(style="thick"), bottom=Side(style="thin"))
+        else:
+            row_border = thin_border
+        previous_day = current_day
+
+        # Fondo alterno en filas
+        fill_color = PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid") if row_idx % 2 == 0 else None
+
+        for col_idx, value in enumerate(row_data, start=1):
+            cell = ws.cell(row=row_idx, column=col_idx, value=value)
+            cell.border = row_border
+            cell.alignment = alignment_center
+            if fill_color:
+                cell.fill = fill_color
+
+    # Autoajuste de anchos de columnas
+    for col in ws.columns:
+        max_length = 0
+        col_letter = get_column_letter(col[0].column)
+        for cell in col:
+            try:
+                if cell.value:
+                    length = len(str(cell.value))
+                    if length > max_length:
+                        max_length = length
+            except:
+                pass
+        ws.column_dimensions[col_letter].width = max_length + 2
+
+    wb.save(output_path)
+    log_callback("Archivo formateado y guardado exitosamente.\n")
+
+# ---------------- Interfaz Gráfica con tkinter ------------------
+
+class TransformacionApp(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title("Transformación de Excel - MAQUILACIÓN DE DATOS")
+        self.geometry("750x600")
+        self.configure(bg="#f0f8ff")  # Fondo azul claro
+        self.resizable(False, False)
+        self.ruta_input = None
+        self.ruta_guardado = None
+        
+        # Título
+        tk.Label(self, text="Transformación de Excel", font=("Arial", 16, "bold"), bg="#f0f8ff", fg="#003366").pack(pady=10)
+        tk.Label(self, text="Selecciona el archivo EXCEL1 para transformar:", font=("Arial", 12), bg="#f0f8ff").pack(pady=5)
+        
+        # Botón de selección de archivo
+        self.btn_seleccionar = tk.Button(self, text="Seleccionar archivo", command=self.seleccionar_archivo, width=30, bg="#4CAF50", fg="white", font=("Arial", 10, "bold"))
+        self.btn_seleccionar.pack(pady=5)
+        self.lbl_archivo = tk.Label(self, text="Ningún archivo seleccionado.", wraplength=700, fg="#003366", bg="#f0f8ff", font=("Arial", 10))
+        self.lbl_archivo.pack(pady=5)
+        
+        # Botón para procesar y guardar
+        self.btn_procesar = tk.Button(self, text="Procesar y Guardar", command=self.procesar_guardar, width=30, state=tk.DISABLED, bg="#2196F3", fg="white", font=("Arial", 10, "bold"))
+        self.btn_procesar.pack(pady=10)
+        
+        # Cuadro de log
+        self.txt_log = ScrolledText(self, width=85, height=18, state=tk.DISABLED, font=("Arial", 9))
+        self.txt_log.pack(pady=10)
+        
+         # Botón para abrir archivo generado
+        self.btn_abrir = tk.Button(self, text="Abrir archivo generado", command=self.abrir_archivo, width=30, state=tk.DISABLED, bg="#FF9800", fg="white", font=("Arial", 10, "bold"))
+        self.btn_abrir.pack(pady=10)
+
+    def log(self, mensaje):
+        self.txt_log.configure(state=tk.NORMAL)
+        self.txt_log.insert(tk.END, mensaje)
+        self.txt_log.see(tk.END)
+        self.txt_log.configure(state=tk.DISABLED)
+    
+    def seleccionar_archivo(self):
+        ruta = filedialog.askopenfilename(
+            title="Selecciona el archivo excel1.xlsx",
+            filetypes=[("Archivos de Excel", "*.xlsx *.xls")]
+        )
+        if ruta:
+            self.ruta_input = ruta
+            self.lbl_archivo.config(text=f"Archivo seleccionado: {ruta}")
+            self.log("Archivo seleccionado.\n")
+            self.btn_procesar.config(state=tk.NORMAL)
+        else:
+            self.lbl_archivo.config(text="Ningún archivo seleccionado.")
+            self.btn_procesar.config(state=tk.DISABLED)
+    
+    def procesar_guardar(self):
+        if not self.ruta_input:
+            messagebox.showwarning("Atención", "No se ha seleccionado ningún archivo de entrada.")
+            return
+        self.log("Iniciando transformación...\n")
+        df_result = transformar_archivo(self.ruta_input, self.log)
+        if df_result is None:
+            self.log("Error durante la transformación.\n")
+            return
+        
+        ruta_guardado = filedialog.asksaveasfilename(
+            defaultextension=".xlsx",
+            filetypes=[("Archivos de Excel", "*.xlsx")],
+            title="Guardar archivo generado"
+        )
+        if not ruta_guardado:
+            self.log("No se seleccionó ruta para guardar el archivo.\n")
+            return
+        
+        try:
+            crear_excel_formateado(df_result, ruta_guardado, self.log)
+            self.ruta_guardado = ruta_guardado
+            self.log(f"Archivo generado exitosamente: {ruta_guardado}\n")
+            messagebox.showinfo("Proceso completado", "El archivo ha sido generado correctamente.")
+            self.btn_abrir.config(state=tk.NORMAL)
+        except Exception as e:
+            messagebox.showerror("Error", f"Hubo un error al guardar el archivo.\n{e}")
+            self.log(f"Error: {e}\n")
+    
+    def abrir_archivo(self):
+        if self.ruta_guardado and os.path.exists(self.ruta_guardado):
+            try:
+                os.startfile(self.ruta_guardado)
+                self.log("Archivo abierto.\n")
+            except Exception as e:
+                messagebox.showerror("Error", f"No se pudo abrir el archivo generado.\n{e}")
+                self.log(f"Error al abrir el archivo: {e}\n")
+        else:
+            messagebox.showwarning("Advertencia", "El archivo generado no existe o no se ha especificado.")
+            self.log("No se pudo abrir el archivo generado.\n")
+
+if __name__ == "__main__":
+    app = TransformacionApp()
+    app.mainloop()

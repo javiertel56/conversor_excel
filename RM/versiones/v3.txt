@@ -1,0 +1,200 @@
+# =============================
+# Importación de librerías
+# =============================
+import pandas as pd
+import numpy as np
+import tkinter as tk
+from tkinter import filedialog, messagebox
+import os
+import subprocess
+from openpyxl import load_workbook
+from openpyxl.styles import PatternFill, Border, Side, Font, Alignment
+from openpyxl.utils import get_column_letter
+
+# =============================
+# Función de transformación principal
+# =============================
+def transformar_excel(ruta_entrada, ruta_salida):
+    df = pd.read_excel(ruta_entrada)
+
+    df = df[~df['Importe'].astype(str).str.contains('-')]
+    df = df[df["Importe"] >= 0]
+    df['Asiento contable'] = df['Asiento contable'].ffill()
+
+    df['linea'] = df['Líneas de factura'].fillna('').astype(str).str.lower()
+    df['partner'] = df['Partner'].fillna('').astype(str).str.lower()
+
+    keywords_map = {
+        'Facta': ['facta'],
+        'Master': ['max'],
+        'Almacen': ['alm', 'almacen'],
+        'Comision': ['comision'],
+        'Submarcell': ['submr'],
+        'Linea 9': ['linea 9', 'línea 9'],
+        'Caja de cobro': ['caja de cobro'],
+        'Traspaso': ['traspaso'],
+        'SAT': ['sat', 'servicio de administracion', 'servicios de administracion']
+    }
+
+    def match_keywords(text, keywords):
+        return any(kw in text for kw in keywords)
+
+    output = pd.DataFrame()
+    output['Día'] = pd.to_datetime(df['Fecha']).dt.date
+    output['Concepto / Referencia'] = df['Líneas de factura'].fillna('').astype(str).str.strip()
+    output['cargo'] = df['Líneas de factura/Débito']
+    output['Abono'] = df['Líneas de factura/Crédito']
+    output['Referencia'] = df['Referencia']
+
+    for col, keys in keywords_map.items():
+        output[col] = df.apply(
+            lambda row: row['Líneas de factura/Débito'] if match_keywords(row['linea'], keys) or match_keywords(row['partner'], keys) else np.nan,
+            axis=1
+        )
+
+    clas_cols = list(keywords_map.keys())
+    suma_clas = output[clas_cols].sum(axis=1, skipna=True)
+    output['Otros'] = np.where((suma_clas == 0) & (output['cargo'].notna()), output['cargo'], np.nan)
+    suma_total = output[clas_cols + ['Otros']].sum(axis=1, skipna=True)
+    output['Redond'] = output['cargo'].fillna(0) - suma_total.fillna(0)
+    output['Saldo'] = 0.0
+
+    output = output.sort_values(by='Día')
+    output.insert(0, 'Unnamed: 0', range(1, len(output) + 1))
+
+    total_row = {col: output[col].sum() if output[col].dtype != 'O' else '' for col in output.columns}
+    total_row['Concepto / Referencia'] = 'TOTAL'
+    output.loc[len(output)] = total_row
+
+    output.to_excel(ruta_salida, index=False)
+
+    # =============================
+    # Mejorar estilos con openpyxl
+    # =============================
+    wb = load_workbook(ruta_salida)
+    ws = wb.active
+
+    # Fijar encabezado
+    ws.freeze_panes = "B2"
+
+    # Filtros
+    ws.auto_filter.ref = f"A1:{get_column_letter(ws.max_column)}1"
+
+    # Ajustar ancho de columnas automáticamente
+    for col in ws.columns:
+        max_length = 0
+        column = col[0].column_letter
+        for cell in col:
+            try:
+                if cell.value:
+                    max_length = max(max_length, len(str(cell.value)))
+            except:
+                pass
+        ws.column_dimensions[column].width = max_length + 2
+
+    # Colores y bordes
+    fill_green = PatternFill(start_color="D9EAD3", end_color="D9EAD3", fill_type="solid")
+    fill_yellow = PatternFill(start_color="FFFF99", end_color="FFFF99", fill_type="solid")
+    border = Border(bottom=Side(style="thin", color="000000"))
+    bold_font = Font(bold=True)
+    center_alignment = Alignment(horizontal="center", vertical="center")
+
+    # Estilos para las celdas con valores
+    for col in range(6, 6 + len(clas_cols)):
+        for row in range(2, ws.max_row):
+            cell = ws.cell(row=row, column=col + 1)
+            if cell.value not in (None, 0, ''):
+                cell.fill = fill_green
+                cell.alignment = center_alignment
+
+    # Bordes entre fechas distintas
+    last_date = None
+    for i in range(2, ws.max_row):
+        current_date = ws.cell(row=i, column=2).value
+        if current_date != last_date and last_date is not None:
+            for col in range(1, ws.max_column + 1):
+                ws.cell(row=i - 1, column=col).border = border
+        last_date = current_date
+
+    # Estilo total
+    for col in range(1, ws.max_column + 1):
+        cell = ws.cell(row=ws.max_row, column=col)
+        cell.fill = fill_yellow
+        cell.font = bold_font
+        cell.alignment = center_alignment
+
+    # Resaltar cabeceras
+    for col in range(1, ws.max_column + 1):
+        cell = ws.cell(row=1, column=col)
+        cell.font = bold_font
+        cell.fill = PatternFill(start_color="3498db", end_color="3498db", fill_type="solid")
+        cell.alignment = center_alignment
+
+    wb.save(ruta_salida)
+
+# =============================
+# Interfaz gráfica mejorada
+# =============================
+class App:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("📊 Transformador de Excel Contable")
+        self.root.geometry("800x500")
+        self.root.configure(bg='#ecf0f1')
+
+        self.ruta_entrada = ''
+        self.ruta_salida = ''
+        self.build_ui()
+
+    def build_ui(self):
+        tk.Label(self.root, text="💼 Transformador Excel Contable", font=("Helvetica", 22, "bold"), bg="#ecf0f1", fg="#2c3e50").pack(pady=20)
+
+        tk.Button(self.root, text="📂 Cargar archivo Excel", font=("Helvetica", 14), bg="#2980b9", fg="white",
+                command=self.cargar_archivo, padx=10, pady=5).pack(pady=10)
+
+        self.label_archivo = tk.Label(self.root, text="Archivo cargado: Ninguno", font=("Helvetica", 10), bg="#ecf0f1", fg="#7f8c8d", wraplength=700)
+        self.label_archivo.pack(pady=5)
+
+        tk.Button(self.root, text="💾 Generar y guardar archivo", font=("Helvetica", 14), bg="#27ae60", fg="white",
+                command=self.guardar_archivo, padx=10, pady=5).pack(pady=15)
+
+        self.label_guardado = tk.Label(self.root, text="Archivo generado: Ninguno", font=("Helvetica", 10), bg="#ecf0f1", fg="#7f8c8d", wraplength=700)
+        self.label_guardado.pack(pady=5)
+
+        tk.Button(self.root, text="📊 Abrir archivo generado", font=("Helvetica", 14), bg="#e67e22", fg="white",
+                command=self.abrir_archivo, padx=10, pady=5).pack(pady=10)
+
+    def cargar_archivo(self):
+        ruta = filedialog.askopenfilename(filetypes=[("Archivos Excel", "*.xlsx")])
+        if ruta:
+            self.ruta_entrada = ruta
+            self.label_archivo.config(text=f"Archivo cargado: {os.path.basename(ruta)}")
+
+    def guardar_archivo(self):
+        if not self.ruta_entrada:
+            messagebox.showwarning("⚠️ Advertencia", "Primero selecciona un archivo.")
+            return
+
+        ruta = filedialog.asksaveasfilename(defaultextension=".xlsx", filetypes=[("Archivos Excel", "*.xlsx")])
+        if ruta:
+            try:
+                transformar_excel(self.ruta_entrada, ruta)
+                self.ruta_salida = ruta
+                self.label_guardado.config(text=f"Archivo generado: {os.path.basename(ruta)}")
+                messagebox.showinfo("✅ Listo", "Archivo transformado correctamente.")
+            except Exception as e:
+                messagebox.showerror("❌ Error", str(e))
+
+    def abrir_archivo(self):
+        if self.ruta_salida and os.path.exists(self.ruta_salida):
+            subprocess.Popen(['start', '', self.ruta_salida], shell=True)
+        else:
+            messagebox.showwarning("⚠️ Aviso", "No se ha generado o encontrado el archivo aún.")
+
+# =============================
+# Punto de entrada
+# =============================
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = App(root)
+    root.mainloop()
