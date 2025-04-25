@@ -11,7 +11,7 @@ from openpyxl import load_workbook
 from openpyxl.styles import PatternFill, Border, Side, Font, Alignment, numbers
 from openpyxl.utils import get_column_letter
 from openpyxl.chart import BarChart, Reference
-                                                                                                                                                    
+
 # =============================
 # Función de transformación principal
 # =============================
