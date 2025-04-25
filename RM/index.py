@@ -36,7 +36,7 @@ def transformar_excel(ruta_entrada, ruta_salida):
         'Facta': ['facta'],
         'Master': ['max'],
         'Almacen': ['alm', 'almacen'],
-        'Comision': ['comision'],
+        'Comision': ['comision', 'b/2025'],
         'Submarcell': ['submr'],
         'Linea 9': ['linea 9', 'línea 9'],
         'Caja de cobro': ['caja de cobro'],
@@ -200,15 +200,7 @@ def transformar_excel(ruta_entrada, ruta_salida):
         cell.font = Font(bold=True)
         cell.alignment = Alignment(horizontal='center')
 
-    # Gráfico de resumen
-    chart = BarChart()
-    chart.title = 'Resumen Totales por Categor%C3%ADa'
-    cats = Reference(ws, min_row=1, min_col=7, max_col=6 + len(keywords_map))
-    vals = Reference(ws, min_row=ws.max_row, min_col=7, max_col=6 + len(keywords_map))
-    chart.add_data(vals, titles_from_data=False)
-    chart.set_categories(cats)
-    ws_chart = wb.create_sheet('Resumen')
-    ws_chart.add_chart(chart, 'A1')
+  
 
     wb.save(ruta_salida)
 

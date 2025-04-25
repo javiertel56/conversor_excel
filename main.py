@@ -6,8 +6,8 @@ import os
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("🔧 Transformador de Datos 2025")
-        self.geometry("600x350")
+        self.title("📊 Transformador Excel Contable")
+        self.geometry("600x400")
         self.configure(bg="#e8f0fe")
         self.iconbitmap(default='icono.ico') if os.path.exists("icono.ico") else None
 
@@ -68,7 +68,7 @@ class App(tk.Tk):
                 messagebox.showinfo("Éxito", f"Transformación {nombre} completada.")
             except subprocess.CalledProcessError as e:
                 self.status.set("Error en la ejecución.")
-                messagebox.showerror("Error", f"Ocurrió un error al ejecutar: {nombre}.\n{e}")
+                messagebox.showerror("Error", f"Ocurrió un error al ejecutar {nombre}.\n{e}")
         else:
             self.status.set("Archivo no encontrado.")
             messagebox.showerror("Error", f"No se encontró el archivo {ruta}")
