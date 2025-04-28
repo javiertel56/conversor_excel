@@ -10,8 +10,8 @@ import subprocess
 from openpyxl import load_workbook
 from openpyxl.styles import PatternFill, Border, Side, Font, Alignment, numbers
 from openpyxl.utils import get_column_letter
-from openpyxl.chart import BarChart, Reference, PieChart
-
+from openpyxl.chart import BarChart, Reference
+                                                                                                                                                    
 # =============================
 # Función de transformación principal
 # =============================
@@ -200,125 +200,7 @@ def transformar_excel(ruta_entrada, ruta_salida):
         cell.font = Font(bold=True)
         cell.alignment = Alignment(horizontal='center')
 
-    # ========================
-    # DASHBOARD EN HOJA RESUME (como segunda hoja)
-    # ========================
-    # Elimina hoja Resume si ya existe
-    if 'Resume' in wb.sheetnames:
-        del wb['Resume']
-    ws_resume = wb.create_sheet('Resume', 1)  # Índice 1 = segunda hoja
-
-    ws_resume['A1'] = "DASHBOARD RESUMEN CONTABLE"
-    ws_resume['A1'].font = Font(size=18, bold=True, color="4472C4")
-    ws_resume.merge_cells('A1:F1')
-    ws_resume['A1'].alignment = Alignment(horizontal='center')
-
-    # Buscar índices de columnas relevantes
-    abono_idx = [i for i, c in enumerate(df_grouped.columns, 1) if c == 'Abono'][0]
-    redond_idx = [i for i, c in enumerate(df_grouped.columns, 1) if c == 'Redond'][0]
-    saldo_idx = [i for i, c in enumerate(df_grouped.columns, 1) if c == 'Saldo'][0]
-
-    # KPIs principales (usando valores, no fórmulas)
-    ws_resume['A3'] = "Total Abono"
-    ws_resume['B3'] = float(df_grouped['Abono'][:-1].sum())
-    ws_resume['A4'] = "Total Redondeo"
-    ws_resume['B4'] = float(df_grouped['Redond'][:-1].sum())
-    ws_resume['A5'] = "Total Saldo"
-    ws_resume['B5'] = float(df_grouped['Saldo'][:-1].sum())
-
-    for row in range(3, 6):
-        ws_resume[f'A{row}'].font = Font(bold=True)
-        ws_resume[f'B{row}'].number_format = '#,##0.00'
-        ws_resume[f'B{row}'].font = Font(color="008000", bold=True)
-
-    # Tabla resumen por categoría (usando valores, no fórmulas)
-    ws_resume['A8'] = "Categoría"
-    ws_resume['B8'] = "Total"
-    ws_resume['A8'].font = ws_resume['B8'].font = Font(bold=True, color="FFFFFF")
-    ws_resume['A8'].fill = ws_resume['B8'].fill = PatternFill('solid', start_color='4472C4', end_color='4472C4')
-    cat_row = 9
-    for cat in keywords_map:
-        ws_resume[f'A{cat_row}'] = cat
-        ws_resume[f'B{cat_row}'] = float(df_grouped[cat][:-1].sum())
-        ws_resume[f'B{cat_row}'].number_format = '#,##0.00'
-        ws_resume[f'A{cat_row}'].font = Font(bold=True)
-        ws_resume[f'B{cat_row}'].font = Font(color="003366", bold=True)
-        cat_row += 1
-
-    # Gráfico de barras por categoría
-    chart = BarChart()
-    chart.title = "Totales por Categoría"
-    chart.y_axis.title = "Monto"
-    chart.x_axis.title = "Categoría"
-    data = Reference(ws_resume, min_col=2, min_row=8, max_row=cat_row-1)
-    cats = Reference(ws_resume, min_col=1, min_row=9, max_row=cat_row-1)
-    chart.add_data(data, titles_from_data=True)
-    chart.set_categories(cats)
-    chart.height = 7
-    chart.width = 16
-    ws_resume.add_chart(chart, "D8")
-
-    # Gráfico de pastel de distribución por categoría
-    pie = PieChart()
-    pie.title = "Distribución % por Categoría"
-    pie_data = Reference(ws_resume, min_col=2, min_row=9, max_row=cat_row-1)
-    pie_labels = Reference(ws_resume, min_col=1, min_row=9, max_row=cat_row-1)
-    pie.add_data(pie_data, titles_from_data=False)
-    pie.set_categories(pie_labels)
-    pie.height = 7
-    pie.width = 8
-    ws_resume.add_chart(pie, "D22")
-
-    # KPIs destacados con fondo y tamaño grande
-    for row in range(3, 6):
-        ws_resume[f'A{row}'].fill = PatternFill('solid', start_color='EAF1FB', end_color='EAF1FB')
-        ws_resume[f'B{row}'].fill = PatternFill('solid', start_color='EAF1FB', end_color='EAF1FB')
-        ws_resume[f'B{row}'].font = Font(color="008000", bold=True, size=14)
-        ws_resume[f'A{row}'].font = Font(bold=True, size=13)
-        ws_resume[f'A{row}'].alignment = Alignment(horizontal='right')
-        ws_resume[f'B{row}'].alignment = Alignment(horizontal='center')
-
-    # Línea separadora visual
-    for col in ['A', 'B', 'C', 'D', 'E', 'F']:
-        ws_resume[f'{col}7'].border = Border(bottom=Side(style='medium', color='4472C4'))
-
-    # Tabla dinámica básica: Total por Día y Categoría
-    ws_resume['A20'] = "Tabla dinámica: Total por Día y Categoría"
-    ws_resume['A20'].font = Font(bold=True, color="4472C4", size=13)
-    ws_resume.merge_cells('A20:D20')
-    ws_resume['A20'].alignment = Alignment(horizontal='left')
-
-    # Prepara datos para tabla dinámica
-    pivot = df_grouped.iloc[:-1].groupby(['Día'])[[k for k in keywords_map]].sum().reset_index()
-    pivot_start = 22
-    ws_resume[f'A{pivot_start}'] = "Día"
-    for i, cat in enumerate(keywords_map, 2):
-        ws_resume.cell(row=pivot_start, column=i, value=cat)
-    for i, row in enumerate(pivot.itertuples(index=False), pivot_start+1):
-        ws_resume.cell(row=i, column=1, value=str(row[0]))
-        for j, val in enumerate(row[1:], 2):
-            ws_resume.cell(row=i, column=j, value=float(val))
-            ws_resume.cell(row=i, column=j).number_format = '#,##0.00'
-
-    # Bordes y sombreado para tabla dinámica
-    for r in range(pivot_start, pivot_start + len(pivot) + 1):
-        for c in range(1, len(keywords_map) + 2):
-            cell = ws_resume.cell(row=r, column=c)
-            cell.border = Border(left=Side(style='thin', color='CCCCCC'),
-                                 right=Side(style='thin', color='CCCCCC'),
-                                 top=Side(style='thin', color='CCCCCC'),
-                                 bottom=Side(style='thin', color='CCCCCC'))
-            if r == pivot_start:
-                cell.fill = PatternFill('solid', start_color='B4C6E7', end_color='B4C6E7')
-                cell.font = Font(bold=True, color="FFFFFF")
-            else:
-                cell.fill = PatternFill('solid', start_color='F7F7F7', end_color='F7F7F7')
-
-    # Ajustar anchos
-    ws_resume.column_dimensions['A'].width = 22
-    ws_resume.column_dimensions['B'].width = 18
-    for col in range(3, len(keywords_map) + 2):
-        ws_resume.column_dimensions[get_column_letter(col)].width = 15
+  
 
     wb.save(ruta_salida)
 
@@ -378,7 +260,7 @@ class App:
         btn_guardar.grid(row=0, column=1, padx=10, pady=8, sticky="ew")
 
         self.btn_abrir = tk.Button(
-            main_frame, text="📊 Abrir archivo generado", font=("Segoe UI", 13, "bold"),
+            main_frame, text="▶ Abrir archivo generado", font=("Segoe UI", 13, "bold"),
             bg="#fdcb6e", fg="#23272e", activebackground="#ffeaa7", activeforeground="#23272e",
             width=28, height=1, command=self.abrir_archivo, bd=0, relief="ridge", cursor="hand2", state=tk.DISABLED
         )
